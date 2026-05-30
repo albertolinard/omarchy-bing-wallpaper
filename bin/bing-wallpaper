@@ -1,0 +1,149 @@
+#!/bin/bash
+# bing-wallpaper — download Microsoft's daily/curated images and cycle them as the wallpaper.
+#
+# Sources, both saved to ~/Pictures/bing:
+#   - Bing daily wallpaper (the desktop feed, last 8 days)
+#   - Windows Spotlight  (the lock/login screen feed, curated UHD landscapes)
+#
+# Usage:
+#   bing-wallpaper fetch     # download both Bing + Spotlight images into the archive
+#   bing-wallpaper bing      # download Bing images only
+#   bing-wallpaper spotlight # download Windows Spotlight images only
+#   bing-wallpaper next      # advance wallpaper to the next image in the archive (wraps around)
+#   bing-wallpaper prev      # go back to the previous image
+#   bing-wallpaper random    # pick a random image from the archive
+#   bing-wallpaper           # fetch, then show the newest image
+#
+# Config via env:
+#   BING_MARKET=en-US   (set to "auto" to let Bing choose by IP)
+#   BING_RES=UHD        (preferred res; falls back to lower if unavailable)
+#   BING_COUNT=8        (how many recent days to fetch; max 8)
+#
+# Images are downloaded once at the best available resolution and kept
+# permanently in ~/Pictures/bing (the archive is never pruned).
+
+set -euo pipefail
+
+MARKET="${BING_MARKET:-en-US}"
+RES="${BING_RES:-UHD}"
+COUNT="${BING_COUNT:-8}"
+DEST_DIR="$HOME/Pictures/bing"
+CURRENT_BACKGROUND_LINK="$HOME/.config/omarchy/current/background"
+
+mkdir -p "$DEST_DIR"
+
+slugify() { echo "$1" | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//'; }
+
+# Bing's daily images (the desktop wallpaper feed) — last $COUNT days
+fetch_bing() {
+  local api meta n i urlbase startdate title outfile res
+  api="https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=$COUNT"
+  [[ "$MARKET" != "auto" ]] && api+="&mkt=$MARKET"
+  meta="$(curl -fsSL "$api")" || return 0
+
+  n="$(jq '.images | length' <<<"$meta")"
+  for ((i = 0; i < n; i++)); do
+    urlbase="$(jq -r ".images[$i].urlbase" <<<"$meta")"
+    startdate="$(jq -r ".images[$i].startdate" <<<"$meta")"
+    title="$(jq -r ".images[$i].title // \"bing\"" <<<"$meta")"
+    [[ -z "$urlbase" || "$urlbase" == "null" ]] && continue
+
+    outfile="$DEST_DIR/bing-${startdate}-$(slugify "$title").jpg"
+    [[ -f "$outfile" ]] && continue
+
+    # Download once at the best available resolution (try preferred, then fall back)
+    for res in "$RES" 3840x2160 1920x1200 1920x1080 1366x768; do
+      curl -fsSL "https://www.bing.com${urlbase}_${res}.jpg" -o "$outfile" && break
+    done
+  done
+}
+
+# Windows Spotlight images (the lock/login screen feed) — curated UHD landscapes
+fetch_spotlight() {
+  local api resp asset title outfile item
+  api="https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt=8&country=${MARKET#*-}&locale=${MARKET}&fmt=json"
+  resp="$(curl -fsSL "$api")" || return 0
+
+  while IFS= read -r item; do
+    asset="$(jq -r '.ad.landscapeImage.asset // empty' <<<"$item")"
+    title="$(jq -r '.ad.title // "spotlight"' <<<"$item")"
+    [[ -z "$asset" ]] && continue
+
+    outfile="$DEST_DIR/spotlight-$(slugify "$title").jpg"
+    [[ -f "$outfile" ]] && continue
+    curl -fsSL "$asset" -o "$outfile" || true
+  done < <(jq -c '.batchrsp.items[].item | fromjson' <<<"$resp" 2>/dev/null)
+}
+
+fetch() {
+  fetch_bing
+  fetch_spotlight
+}
+
+# List archive images, sorted (oldest -> newest by date-prefixed filename)
+list_images() {
+  find -L "$DEST_DIR" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.png' \) | sort
+}
+
+apply() {
+  local file="$1"
+  ln -nsf "$file" "$CURRENT_BACKGROUND_LINK"
+
+  if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+    local rt sock
+    rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    sock="$(find "$rt" -maxdepth 1 -name 'wayland-[0-9]*' ! -name '*.lock' -printf '%f\n' 2>/dev/null | sort | head -n1)"
+    [[ -n "$sock" ]] && export WAYLAND_DISPLAY="$sock"
+  fi
+
+  if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+    pkill -x swaybg 2>/dev/null || true
+    if command -v uwsm-app >/dev/null 2>&1; then
+      setsid uwsm-app -- swaybg -i "$CURRENT_BACKGROUND_LINK" -m fill >/dev/null 2>&1 &
+    else
+      setsid swaybg -i "$CURRENT_BACKGROUND_LINK" -m fill >/dev/null 2>&1 &
+    fi
+  fi
+  echo "$file"
+}
+
+# step <+1|-1> — move through the archive relative to the current image
+step() {
+  local dir="$1"
+  mapfile -t imgs < <(list_images)
+  ((${#imgs[@]} == 0)) && { echo "bing-wallpaper: no images yet, run 'bing-wallpaper fetch'" >&2; exit 1; }
+
+  local current index=-1 i
+  current="$(readlink "$CURRENT_BACKGROUND_LINK" 2>/dev/null || true)"
+  for i in "${!imgs[@]}"; do
+    [[ "${imgs[$i]}" == "$current" ]] && { index=$i; break; }
+  done
+  # wrap-around modulo that stays positive
+  local n=${#imgs[@]}
+  local new=$(((index + dir + n) % n))
+  apply "${imgs[$new]}"
+}
+
+random() {
+  mapfile -t imgs < <(list_images)
+  ((${#imgs[@]} == 0)) && { echo "bing-wallpaper: no images yet, run 'bing-wallpaper fetch'" >&2; exit 1; }
+  apply "${imgs[RANDOM % ${#imgs[@]}]}"
+}
+
+newest() {
+  mapfile -t imgs < <(list_images)
+  ((${#imgs[@]} == 0)) && { echo "bing-wallpaper: no images yet" >&2; exit 1; }
+  apply "${imgs[-1]}"
+}
+
+case "${1:-default}" in
+  fetch)     fetch ;;
+  bing)      fetch_bing ;;
+  spotlight) fetch_spotlight ;;
+  next)      step +1 ;;
+  prev)      step -1 ;;
+  random)    random ;;
+  newest)    newest ;;
+  default)   fetch; newest ;;
+  *) echo "Usage: bing-wallpaper {fetch|bing|spotlight|next|prev|random|newest}" >&2; exit 1 ;;
+esac

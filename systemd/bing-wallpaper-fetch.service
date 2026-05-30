@@ -1,0 +1,6 @@
+[Unit]
+Description=Download Bing's recent daily images
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bing-wallpaper fetch
