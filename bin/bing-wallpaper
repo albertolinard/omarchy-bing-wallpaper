@@ -34,6 +34,33 @@ mkdir -p "$DEST_DIR"
 
 slugify() { echo "$1" | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//'; }
 
+# Turn an archive filename back into a human-readable "Title (Source)" label.
+#   bing-20260530-mountain-lake.jpg -> "Mountain lake (Bing)"
+#   spotlight-coastal-cliffs.jpg    -> "Coastal cliffs (Spotlight)"
+pretty_name() {
+  local base name source
+  base="$(basename "$1")"
+  base="${base%.*}"
+  case "$base" in
+    bing-*)      source="Bing";      name="$(sed -E 's/^bing-[0-9]{8}-//' <<<"$base")" ;;
+    spotlight-*) source="Spotlight"; name="${base#spotlight-}" ;;
+    *)           source="";          name="$base" ;;
+  esac
+  name="${name//-/ }"
+  [[ -n "$name" ]] || name="image"
+  if [[ -n "$source" ]]; then echo "$name ($source)"; else echo "$name"; fi
+}
+
+# Desktop notification naming the wallpaper, using the image as the icon.
+# No-op if notify-send is unavailable (e.g. headless). The synchronous hint
+# makes rapid next/prev replace the previous toast instead of stacking.
+notify_wallpaper() {
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -a "Bing Wallpaper" -i "$1" \
+    -h string:x-canonical-private-synchronous:bing-wallpaper \
+    "Wallpaper updated" "$(pretty_name "$1")" 2>/dev/null || true
+}
+
 # Bing's daily images (the desktop wallpaper feed) — last $COUNT days
 fetch_bing() {
   local api meta n i urlbase startdate title outfile res
@@ -104,6 +131,7 @@ apply() {
       setsid swaybg -i "$CURRENT_BACKGROUND_LINK" -m fill >/dev/null 2>&1 &
     fi
   fi
+  notify_wallpaper "$file"
   echo "$file"
 }
 

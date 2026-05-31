@@ -8,6 +8,7 @@ There's no official Bing Wallpaper app for Linux, so this is a tiny self-contain
 - Keeps them **permanently cached** in `~/Pictures/bing` so you build up a growing gallery (~4–10 MB/day, roughly 1.5–3 GB/year).
 - Cycle instantly with **`SUPER+ALT+→` / `SUPER+ALT+←`**.
 - A **systemd user timer** fetches new images once a day.
+- Shows a **desktop notification** naming the image whenever the wallpaper changes.
 
 ## Requirements
 
@@ -56,6 +57,7 @@ Set environment variables (e.g. in `~/.config/uwsm/env` or before running):
 
 - Switching Omarchy **themes** runs `omarchy theme bg next`, which replaces the wallpaper with the theme's own background. Press `SUPER+ALT+→` to return to a Bing/Spotlight image.
 - The Spotlight feed serves a rotating handful at a time; the archive fills out over several days as the daily timer runs.
+- Every wallpaper change pops a notification (via `notify-send`/mako) showing the image name and source. It's skipped automatically when no notification daemon is available.
 
 ## Uninstall
 
