@@ -4,7 +4,7 @@ Bring **Bing's daily wallpaper** and **Windows Spotlight** images to [Omarchy](h
 
 There's no official Bing Wallpaper app for Linux, so this is a tiny self-contained replacement:
 
-- Downloads the **Bing daily wallpaper** (last 8 days) and **Windows Spotlight** images (the curated lock/login-screen photos) — both at the best available resolution (UHD when offered).
+- Downloads the **Bing daily wallpaper** (up to the ~16 days Bing's feed exposes) and **Windows Spotlight** images (the curated lock/login-screen photos) — both at the best available resolution (UHD when offered).
 - Keeps them **permanently cached** in `~/Pictures/bing` so you build up a growing gallery (~4–10 MB/day, roughly 1.5–3 GB/year).
 - Cycle instantly with **`SUPER+ALT+→` / `SUPER+ALT+←`**.
 - A **systemd user timer** fetches new images once a day.
@@ -51,12 +51,13 @@ Set environment variables (e.g. in `~/.config/uwsm/env` or before running):
 |----------|---------|---------|
 | `BING_MARKET` | `en-US` | Region/locale; use `auto` to let Bing choose by IP |
 | `BING_RES` | `UHD` | Preferred Bing resolution; falls back to lower if unavailable |
-| `BING_COUNT` | `8` | How many recent Bing days to fetch (max 8) |
+| `BING_COUNT` | `8` | How many recent Bing days to fetch. The script pages the feed in chunks of 8; values above what Bing serves (~16 days) are capped automatically |
+| `SPOTLIGHT_POLLS` | `8` | How many times to poll the rotating Spotlight feed per run. The feed returns only ~4 images per call, so more polls surface more of the curated catalog in one go |
 
 ## Notes
 
 - Switching Omarchy **themes** runs `omarchy theme bg next`, which replaces the wallpaper with the theme's own background. Press `SUPER+ALT+→` to return to a Bing/Spotlight image.
-- The Spotlight feed serves a rotating handful at a time; the archive fills out over several days as the daily timer runs.
+- The Spotlight feed serves a rotating handful (~4) per call with no date index, so each run polls it `SPOTLIGHT_POLLS` times to gather more of the catalog at once; running the fetch repeatedly (or over several days) keeps surfacing new ones.
 - Every wallpaper change pops a notification (via `notify-send`/mako) showing the image name and source. It's skipped automatically when no notification daemon is available.
 
 ## Uninstall

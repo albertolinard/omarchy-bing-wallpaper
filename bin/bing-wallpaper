@@ -17,7 +17,10 @@
 # Config via env:
 #   BING_MARKET=en-US   (set to "auto" to let Bing choose by IP)
 #   BING_RES=UHD        (preferred res; falls back to lower if unavailable)
-#   BING_COUNT=8        (how many recent days to fetch; max 8)
+#   BING_COUNT=8        (how many recent days to fetch; Bing's feed only goes
+#                        back ~16 days, so higher values are capped to that)
+#   SPOTLIGHT_POLLS=8   (how many times to poll the rotating Spotlight feed per
+#                        run; more polls surface more of the curated catalog)
 #
 # Images are downloaded once at the best available resolution and kept
 # permanently in ~/Pictures/bing (the archive is never pruned).
@@ -27,6 +30,7 @@ set -euo pipefail
 MARKET="${BING_MARKET:-en-US}"
 RES="${BING_RES:-UHD}"
 COUNT="${BING_COUNT:-8}"
+SPOTLIGHT_POLLS="${SPOTLIGHT_POLLS:-8}"
 DEST_DIR="$HOME/Pictures/bing"
 CURRENT_BACKGROUND_LINK="$HOME/.config/omarchy/current/background"
 
@@ -61,45 +65,70 @@ notify_wallpaper() {
     "Wallpaper updated" "$(pretty_name "$1")" 2>/dev/null || true
 }
 
-# Bing's daily images (the desktop wallpaper feed) — last $COUNT days
+# Bing's daily images (the desktop wallpaper feed) — most recent $COUNT days.
+# The API serves at most 8 images per request and only reaches back ~16 days,
+# so we page through it in chunks of 8 (idx=0,8,…) and stop once it stops
+# returning dates we haven't already seen (i.e. it has clamped idx).
 fetch_bing() {
-  local api meta n i urlbase startdate title outfile res
-  api="https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=$COUNT"
-  [[ "$MARKET" != "auto" ]] && api+="&mkt=$MARKET"
-  meta="$(curl -fsSL "$api")" || return 0
+  local idx=0 want api meta n i urlbase startdate title outfile res new_in_page
+  local -A seen=()
 
-  n="$(jq '.images | length' <<<"$meta")"
-  for ((i = 0; i < n; i++)); do
-    urlbase="$(jq -r ".images[$i].urlbase" <<<"$meta")"
-    startdate="$(jq -r ".images[$i].startdate" <<<"$meta")"
-    title="$(jq -r ".images[$i].title // \"bing\"" <<<"$meta")"
-    [[ -z "$urlbase" || "$urlbase" == "null" ]] && continue
+  while ((${#seen[@]} < COUNT)); do
+    want=$((COUNT - ${#seen[@]}))
+    ((want > 8)) && want=8
+    api="https://www.bing.com/HPImageArchive.aspx?format=js&idx=$idx&n=$want"
+    [[ "$MARKET" != "auto" ]] && api+="&mkt=$MARKET"
+    meta="$(curl -fsSL "$api")" || break
 
-    outfile="$DEST_DIR/bing-${startdate}-$(slugify "$title").jpg"
-    [[ -f "$outfile" ]] && continue
+    n="$(jq '.images | length' <<<"$meta")"
+    ((n == 0)) && break
 
-    # Download once at the best available resolution (try preferred, then fall back)
-    for res in "$RES" 3840x2160 1920x1200 1920x1080 1366x768; do
-      curl -fsSL "https://www.bing.com${urlbase}_${res}.jpg" -o "$outfile" && break
+    new_in_page=0
+    for ((i = 0; i < n; i++)); do
+      startdate="$(jq -r ".images[$i].startdate" <<<"$meta")"
+      [[ -n "${seen[$startdate]:-}" ]] && continue
+      seen[$startdate]=1
+      new_in_page=1
+
+      urlbase="$(jq -r ".images[$i].urlbase" <<<"$meta")"
+      title="$(jq -r ".images[$i].title // \"bing\"" <<<"$meta")"
+      [[ -z "$urlbase" || "$urlbase" == "null" ]] && continue
+
+      outfile="$DEST_DIR/bing-${startdate}-$(slugify "$title").jpg"
+      [[ -f "$outfile" ]] && continue
+
+      # Download once at the best available resolution (try preferred, then fall back)
+      for res in "$RES" 3840x2160 1920x1200 1920x1080 1366x768; do
+        curl -fsSL "https://www.bing.com${urlbase}_${res}.jpg" -o "$outfile" && break
+      done
     done
+
+    ((new_in_page == 0)) && break   # API clamped idx; no older images available
+    idx=$((idx + n))
   done
 }
 
-# Windows Spotlight images (the lock/login screen feed) — curated UHD landscapes
+# Windows Spotlight images (the lock/login screen feed) — curated UHD landscapes.
+# The feed has no date index: each call returns a rotating handful (the server
+# caps the batch at 4 regardless of what we ask), so to grow the archive we
+# poll it $SPOTLIGHT_POLLS times per run and let the filename de-dupe overlaps.
 fetch_spotlight() {
-  local api resp asset title outfile item
-  api="https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt=8&country=${MARKET#*-}&locale=${MARKET}&fmt=json"
-  resp="$(curl -fsSL "$api")" || return 0
+  local api resp asset title outfile item poll
+  api="https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt=4&country=${MARKET#*-}&locale=${MARKET}&fmt=json"
 
-  while IFS= read -r item; do
-    asset="$(jq -r '.ad.landscapeImage.asset // empty' <<<"$item")"
-    title="$(jq -r '.ad.title // "spotlight"' <<<"$item")"
-    [[ -z "$asset" ]] && continue
+  for ((poll = 0; poll < SPOTLIGHT_POLLS; poll++)); do
+    resp="$(curl -fsSL "$api")" || return 0
 
-    outfile="$DEST_DIR/spotlight-$(slugify "$title").jpg"
-    [[ -f "$outfile" ]] && continue
-    curl -fsSL "$asset" -o "$outfile" || true
-  done < <(jq -c '.batchrsp.items[].item | fromjson' <<<"$resp" 2>/dev/null)
+    while IFS= read -r item; do
+      asset="$(jq -r '.ad.landscapeImage.asset // empty' <<<"$item")"
+      title="$(jq -r '.ad.title // "spotlight"' <<<"$item")"
+      [[ -z "$asset" ]] && continue
+
+      outfile="$DEST_DIR/spotlight-$(slugify "$title").jpg"
+      [[ -f "$outfile" ]] && continue
+      curl -fsSL "$asset" -o "$outfile" || true
+    done < <(jq -c '.batchrsp.items[].item | fromjson' <<<"$resp" 2>/dev/null)
+  done
 }
 
 fetch() {
