@@ -66,6 +66,11 @@ ARCHIVE
 EOF
 }
 
+# Progress output goes to stderr so the file path printed by apply() on stdout
+# stays clean for scripting/piping.
+log()  { echo ":: $*" >&2; }
+info() { echo "   $*" >&2; }
+
 slugify() { echo "$1" | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//'; }
 
 # Turn an archive filename back into a human-readable "Title (Source)" label.
@@ -101,14 +106,20 @@ notify_wallpaper() {
 # returning dates we haven't already seen (i.e. it has clamped idx).
 fetch_bing() {
   local idx=0 want api meta n i urlbase startdate title outfile res new_in_page
+  local downloaded=0 skipped=0 failed=0 got_res
   local -A seen=()
+
+  log "Fetching Bing daily images (market: $MARKET, up to $COUNT days)"
 
   while ((${#seen[@]} < COUNT)); do
     want=$((COUNT - ${#seen[@]}))
     ((want > 8)) && want=8
     api="https://www.bing.com/HPImageArchive.aspx?format=js&idx=$idx&n=$want"
     [[ "$MARKET" != "auto" ]] && api+="&mkt=$MARKET"
-    meta="$(curl -fsSL "$api")" || break
+    if ! meta="$(curl -fsSL "$api")"; then
+      info "could not reach Bing image feed — stopping"
+      break
+    fi
 
     n="$(jq '.images | length' <<<"$meta")"
     ((n == 0)) && break
@@ -125,17 +136,35 @@ fetch_bing() {
       [[ -z "$urlbase" || "$urlbase" == "null" ]] && continue
 
       outfile="$DEST_DIR/bing-${startdate}-$(slugify "$title").jpg"
-      [[ -f "$outfile" ]] && continue
+      if [[ -f "$outfile" ]]; then
+        ((skipped++)) || true
+        continue
+      fi
 
       # Download once at the best available resolution (try preferred, then fall back)
+      got_res=""
       for res in "$RES" 3840x2160 1920x1200 1920x1080 1366x768; do
-        curl -fsSL "https://www.bing.com${urlbase}_${res}.jpg" -o "$outfile" && break
+        if curl -fsSL "https://www.bing.com${urlbase}_${res}.jpg" -o "$outfile"; then
+          got_res="$res"
+          break
+        fi
       done
+      if [[ -n "$got_res" ]]; then
+        info "↓ $title ($startdate, $got_res)"
+        ((downloaded++)) || true
+      else
+        info "✗ failed to download $title ($startdate)"
+        ((failed++)) || true
+      fi
     done
 
     ((new_in_page == 0)) && break   # API clamped idx; no older images available
     idx=$((idx + n))
   done
+
+  local summary="Bing: $downloaded new, $skipped already had"
+  ((failed > 0)) && summary+=", $failed failed"
+  log "$summary"
 }
 
 # Windows Spotlight images (the lock/login screen feed) — curated UHD landscapes.
@@ -144,10 +173,16 @@ fetch_bing() {
 # poll it $SPOTLIGHT_POLLS times per run and let the filename de-dupe overlaps.
 fetch_spotlight() {
   local api resp asset title outfile item poll
+  local downloaded=0 skipped=0 failed=0
   api="https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt=4&country=${MARKET#*-}&locale=${MARKET}&fmt=json"
 
+  log "Fetching Windows Spotlight images ($SPOTLIGHT_POLLS polls of the rotating feed)"
+
   for ((poll = 0; poll < SPOTLIGHT_POLLS; poll++)); do
-    resp="$(curl -fsSL "$api")" || return 0
+    if ! resp="$(curl -fsSL "$api")"; then
+      info "could not reach Spotlight feed — stopping"
+      break
+    fi
 
     while IFS= read -r item; do
       asset="$(jq -r '.ad.landscapeImage.asset // empty' <<<"$item")"
@@ -155,15 +190,29 @@ fetch_spotlight() {
       [[ -z "$asset" ]] && continue
 
       outfile="$DEST_DIR/spotlight-$(slugify "$title").jpg"
-      [[ -f "$outfile" ]] && continue
-      curl -fsSL "$asset" -o "$outfile" || true
+      if [[ -f "$outfile" ]]; then
+        ((skipped++)) || true
+        continue
+      fi
+      if curl -fsSL "$asset" -o "$outfile"; then
+        info "↓ $title"
+        ((downloaded++)) || true
+      else
+        info "✗ failed to download $title"
+        ((failed++)) || true
+      fi
     done < <(jq -c '.batchrsp.items[].item | fromjson' <<<"$resp" 2>/dev/null)
   done
+
+  local summary="Spotlight: $downloaded new, $skipped already had"
+  ((failed > 0)) && summary+=", $failed failed"
+  log "$summary"
 }
 
 fetch() {
   fetch_bing
   fetch_spotlight
+  log "Archive now holds $(list_images | wc -l) images in $DEST_DIR"
 }
 
 # List archive images, sorted (oldest -> newest by date-prefixed filename)
@@ -189,7 +238,10 @@ apply() {
     else
       setsid swaybg -i "$CURRENT_BACKGROUND_LINK" -m fill >/dev/null 2>&1 &
     fi
+  else
+    info "no Wayland display detected — updated the link but cannot set the live wallpaper"
   fi
+  log "Wallpaper set to: $(pretty_name "$file")"
   notify_wallpaper "$file"
   echo "$file"
 }
