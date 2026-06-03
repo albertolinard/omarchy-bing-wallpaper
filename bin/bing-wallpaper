@@ -36,6 +36,36 @@ CURRENT_BACKGROUND_LINK="$HOME/.config/omarchy/current/background"
 
 mkdir -p "$DEST_DIR"
 
+usage() {
+  cat <<'EOF'
+bing-wallpaper — download Microsoft's daily/curated images and cycle them as the wallpaper.
+
+USAGE
+  bing-wallpaper [command]
+
+COMMANDS
+  fetch       Download both Bing and Spotlight images into the archive
+  bing        Download Bing daily images only
+  spotlight   Download Windows Spotlight images only
+  next        Advance the wallpaper to the next image (wraps around)
+  prev        Go back to the previous image
+  random      Pick a random image from the archive
+  newest      Show the most recent image in the archive
+  help        Show this help (also -h, --help)
+  (none)      Fetch new images, then show the newest one
+
+ENVIRONMENT
+  BING_MARKET      Bing market, e.g. en-US. Use "auto" to let Bing pick by IP   (default: en-US)
+  BING_RES         Preferred resolution; falls back to lower if unavailable     (default: UHD)
+  BING_COUNT       Recent days of Bing images to fetch (feed reaches back ~16)  (default: 8)
+  SPOTLIGHT_POLLS  Times to poll the rotating Spotlight feed per run            (default: 8)
+
+ARCHIVE
+  Images are downloaded once at the best available resolution and kept
+  permanently in ~/Pictures/bing (the archive is never pruned).
+EOF
+}
+
 slugify() { echo "$1" | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//'; }
 
 # Turn an archive filename back into a human-readable "Title (Source)" label.
@@ -202,5 +232,6 @@ case "${1:-default}" in
   random)    random ;;
   newest)    newest ;;
   default)   fetch; newest ;;
-  *) echo "Usage: bing-wallpaper {fetch|bing|spotlight|next|prev|random|newest}" >&2; exit 1 ;;
+  help|-h|--help) usage ;;
+  *) echo "bing-wallpaper: unknown command '$1'" >&2; echo >&2; usage >&2; exit 1 ;;
 esac
